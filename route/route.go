@@ -22,7 +22,7 @@ func SetupRouter(fs *storage.FileStorageManager, security *helpers.Security, sec
 	// r.Use(middleware.AccessKeyMiddleware(security, secretKey, expireSeconds))
 
 	// Create a route group for file service
-	fileService := r.Group("/file-service")
+	fileService := r.Group("/file-service/api/v1")
 	{
 		// Simple upload endpoint
 		fileService.POST("/upload", func(c *gin.Context) {
