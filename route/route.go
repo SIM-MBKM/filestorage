@@ -7,6 +7,7 @@ import (
 	"github.com/SIM-MBKM/filestorage/middleware"
 	"github.com/SIM-MBKM/filestorage/storage"
 	"github.com/SIM-MBKM/mod-service/src/helpers"
+	securityMiddleware "github.com/SIM-MBKM/mod-service/src/middleware"
 	"github.com/gin-gonic/gin"
 )
 
@@ -19,7 +20,7 @@ func SetupRouter(fs *storage.FileStorageManager, security *helpers.Security, sec
 	r.Use(middleware.CORS())
 
 	// Add security middleware
-	// r.Use(middleware.AccessKeyMiddleware(security, secretKey, expireSeconds))
+	r.Use(securityMiddleware.AccessKeyMiddleware(security, secretKey, expireSeconds))
 
 	// Create a route group for file service
 	fileService := r.Group("/file-service/api/v1")
