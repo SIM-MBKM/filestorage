@@ -15,7 +15,6 @@ func main() {
 	secretKey := helpers.GetEnv("APP_KEY", "secret")
 
 	// Configure security middleware
-	security := helpers.NewSecurity("sha256", secretKey, "aes")
 	expireSeconds := int64(9999)
 
 	// Load configuration from environment variables
@@ -34,7 +33,7 @@ func main() {
 	fs := storage.NewFileStorageManager(config, tokenManager)
 
 	// Set up router with all routes and middleware
-	r := route.SetupRouter(fs, security, secretKey, expireSeconds)
+	r := route.SetupRouter(fs, secretKey, expireSeconds)
 
 	// Start the server
 	fmt.Println("Starting server on :8000")

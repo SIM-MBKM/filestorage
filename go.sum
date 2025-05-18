@@ -24,6 +24,8 @@ github.com/SIM-MBKM/mod-service v1.0.2 h1:GNRmUoIZPTmvEoPG8WkjNq97zQ7Gi4583EIu3U
 github.com/SIM-MBKM/mod-service v1.0.2/go.mod h1:+jExVgOlosbMH5AGgZuVTHTQCwP3uU/qOyraCi0CNBg=
 github.com/SIM-MBKM/mod-service v1.0.3 h1:lxzI2grVpAzxEtqbt2w4XMBhJHpP7Av9TcN7VT/GrFc=
 github.com/SIM-MBKM/mod-service v1.0.3/go.mod h1:+jExVgOlosbMH5AGgZuVTHTQCwP3uU/qOyraCi0CNBg=
+github.com/SIM-MBKM/mod-service v1.0.4 h1:Tldk+QreVdam+O8JlpbuCwfCYD16zUxP4u37X9u7OXY=
+github.com/SIM-MBKM/mod-service v1.0.4/go.mod h1:+jExVgOlosbMH5AGgZuVTHTQCwP3uU/qOyraCi0CNBg=
 github.com/aws/aws-sdk-go v1.55.6 h1:cSg4pvZ3m8dgYcgqB97MrcdjUmZ1BeMYKUxMMB89IPk=
 github.com/aws/aws-sdk-go v1.55.6/go.mod h1:eRwEWoyTWFMVYVQzKMNHWP5/RV4xIUGMQfXQHfHkpNU=
 github.com/bytedance/sonic v1.11.6 h1:oUp34TzMlL+OY1OUWxHqsdkgC/Zfc85zGqw9siXjrc0=
@@ -208,6 +210,7 @@ golang.org/x/sync v0.3.0/go.mod h1:FU7BRWz2tNW+3quACPkgCx/L+uEAv1htQ0V83Z9Rj+Y=
 golang.org/x/sync v0.6.0/go.mod h1:Czt+wKu1gCyEFDUtn0jG5QVvpJ6rzVqr5aXyt9drQfk=
 golang.org/x/sync v0.12.0 h1:MHc5BpPuC30uJk597Ri8TV3CNZcTLu6B6z4lJy+g6Jw=
 golang.org/x/sync v0.12.0/go.mod h1:1dzgHSNfp02xaA81J2MS99Qcpr2w7fw1gpm99rleRqA=
+golang.org/x/sync v0.14.0 h1:woo0S4Yywslg6hp4eUFjTVOyKt0RookbpAHG4c1HmhQ=
 golang.org/x/sync v0.14.0/go.mod h1:1dzgHSNfp02xaA81J2MS99Qcpr2w7fw1gpm99rleRqA=
 golang.org/x/sys v0.0.0-20190215142949-d0b11bdaac8a/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
 golang.org/x/sys v0.0.0-20201119102817-f84b799fce68/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
