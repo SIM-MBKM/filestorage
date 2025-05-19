@@ -26,6 +26,10 @@ github.com/SIM-MBKM/mod-service v1.0.3 h1:lxzI2grVpAzxEtqbt2w4XMBhJHpP7Av9TcN7VT
 github.com/SIM-MBKM/mod-service v1.0.3/go.mod h1:+jExVgOlosbMH5AGgZuVTHTQCwP3uU/qOyraCi0CNBg=
 github.com/SIM-MBKM/mod-service v1.0.4 h1:Tldk+QreVdam+O8JlpbuCwfCYD16zUxP4u37X9u7OXY=
 github.com/SIM-MBKM/mod-service v1.0.4/go.mod h1:+jExVgOlosbMH5AGgZuVTHTQCwP3uU/qOyraCi0CNBg=
+github.com/SIM-MBKM/mod-service v1.0.5 h1:y1OIYCCUY3jfOlmRcllxJ2mbA4dvhnkCG0zsu9yWiBA=
+github.com/SIM-MBKM/mod-service v1.0.5/go.mod h1:+jExVgOlosbMH5AGgZuVTHTQCwP3uU/qOyraCi0CNBg=
+github.com/SIM-MBKM/mod-service v1.0.6 h1:2Nrs5//dPJw30/RG7cGtqvGl/nYLMisJr7hC2gm8njg=
+github.com/SIM-MBKM/mod-service v1.0.6/go.mod h1:+jExVgOlosbMH5AGgZuVTHTQCwP3uU/qOyraCi0CNBg=
 github.com/aws/aws-sdk-go v1.55.6 h1:cSg4pvZ3m8dgYcgqB97MrcdjUmZ1BeMYKUxMMB89IPk=
 github.com/aws/aws-sdk-go v1.55.6/go.mod h1:eRwEWoyTWFMVYVQzKMNHWP5/RV4xIUGMQfXQHfHkpNU=
 github.com/bytedance/sonic v1.11.6 h1:oUp34TzMlL+OY1OUWxHqsdkgC/Zfc85zGqw9siXjrc0=
