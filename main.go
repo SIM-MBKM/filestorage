@@ -13,6 +13,7 @@ func main() {
 	// Load environment variables
 	helpers.LoadEnv()
 	secretKey := helpers.GetEnv("APP_KEY", "secret")
+	port := helpers.GetEnv("GOLANG_PORT", "8005")
 
 	// Configure security middleware
 	expireSeconds := int64(9999)
@@ -37,5 +38,5 @@ func main() {
 
 	// Start the server
 	fmt.Println("Starting server on :8000")
-	r.Run(":8000")
+	r.Run(":" + port)
 }

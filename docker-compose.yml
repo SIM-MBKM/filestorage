@@ -19,7 +19,7 @@ services:
   nginx: 
     image: nginx:alpine
     ports:
-      - 8085:80
+      - 8086:80
       - 8447:443
     depends_on:
       - app
