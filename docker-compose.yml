@@ -1,0 +1,41 @@
+services:
+
+  app: 
+    hostname: app
+    container_name: filestorage-service
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - ${GOLANG_PORT}:8888
+    restart: always
+    volumes:
+      - ./:/app
+    networks:
+      - microservices-db-dev  # Consistent network name
+    env_file:
+      - .env
+
+  nginx: 
+    image: nginx:alpine
+    ports:
+      - 8085:80
+      - 8447:443
+    depends_on:
+      - app
+    restart: unless-stopped
+    tty: true
+    volumes:
+      - ./storage/:/app/storage/
+      - ./static/:/app/static/
+      - ./docker/nginx/:/etc/nginx/conf.d
+    networks:
+      - microservices-db-dev  # Fixed: same network as app
+
+volumes:
+  app-volumes:
+
+networks:
+  microservices-db-dev:  # Simplified network definition
+    name: microservices_dev_microservices-db-dev
+    external: true

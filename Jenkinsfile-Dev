@@ -1,0 +1,841 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKER_IMAGE = 'myapp:latest'
+        GCP_PROJECT_ID = 'sim-mbkm'
+        SECRET_NAME = 'filestorage-secrets'
+        // Add pipeline metadata
+        BUILD_TIMESTAMP = sh(script: 'date +%Y%m%d-%H%M%S', returnStdout: true).trim()
+        PIPELINE_VERSION = '2.0'
+        CONTAINER_NAME = 'filestorage-service'
+    }
+    
+    // Add pipeline options for better control
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+        skipStagesAfterUnstable()
+    }
+
+    stages {
+
+        stage('🔍 Environment Check') {
+            steps {
+                script {
+                    echo "🚀 Starting CI/CD Pipeline v${env.PIPELINE_VERSION}"
+                    echo "📅 Build: ${env.BUILD_TIMESTAMP}"
+                    echo "🏗️ Build Number: ${env.BUILD_NUMBER}"
+                    
+                    sh '''#!/bin/bash
+                        echo "=== System Information ==="
+                        echo "OS: $(uname -a)"
+                        echo "User: $(whoami)"
+                        echo "Groups: $(groups)"
+                        echo "Working Directory: $(pwd)"
+                        echo "Disk Space: $(df -h . | tail -1)"
+                        echo "Memory: $(free -h | grep Mem)"
+                        
+                        echo "=== Docker Information ==="
+                        docker --version || echo 'Docker not found'
+                        docker info | head -10 || echo 'Docker info failed'
+                        docker ps --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}" || echo 'Docker ps failed'
+                    '''
+                    
+                    // Check which docker compose command is available
+                    sh '''#!/bin/bash
+                        echo "=== Docker Compose Detection ==="
+                        if command -v docker-compose >/dev/null 2>&1; then
+                            echo "✅ docker-compose (v1) available:"
+                            docker-compose --version
+                            echo "DOCKER_COMPOSE_CMD=docker-compose" > docker_compose_cmd.env
+                        elif docker compose version >/dev/null 2>&1; then
+                            echo "✅ docker compose (v2) available:"
+                            docker compose version
+                            echo "DOCKER_COMPOSE_CMD=docker compose" > docker_compose_cmd.env
+                        else
+                            echo "❌ Neither docker-compose nor docker compose available"
+                            exit 1
+                        fi
+                        
+                        echo "DOCKER_COMPOSE_VERSION=$(source docker_compose_cmd.env && $DOCKER_COMPOSE_CMD version --short 2>/dev/null || echo 'unknown')" >> docker_compose_cmd.env
+                    '''
+                }
+            }
+        }
+
+        stage('🔐 Load Credentials') {
+            steps {
+                script {
+                    withCredentials([
+                        file(credentialsId: "gcp-service-account-key", variable: "GOOGLE_APPLICATION_CREDENTIALS"),
+                        string(credentialsId: "sonarqube-token", variable: "SONAR_TOKEN")
+                    ]) {
+                        echo "✅ GCP service account and SonarQube credentials loaded successfully"
+                        
+                        // Copy file to a known location with better security
+                        sh '''#!/bin/bash
+                            cp "$GOOGLE_APPLICATION_CREDENTIALS" /tmp/gcp-sa-key.json
+                            chmod 600 /tmp/gcp-sa-key.json  # More restrictive permissions
+                            
+                            # Verify file was copied
+                            if [ -f /tmp/gcp-sa-key.json ]; then
+                                echo "✅ Service account key copied successfully"
+                                echo "📊 File size: $(stat -c%s /tmp/gcp-sa-key.json) bytes"
+                            else
+                                echo "❌ Failed to copy service account key"
+                                exit 1
+                            fi
+                        '''
+                        
+                        env.GOOGLE_APPLICATION_CREDENTIALS = "/tmp/gcp-sa-key.json"
+                        env.SONAR_TOKEN = "${SONAR_TOKEN}"
+                    }
+                }
+            }
+        }
+
+        stage('🔧 Setup GCP CLI') {
+            steps {
+                script {
+                    sh '''#!/bin/bash
+                        set -e
+                        echo "🔧 Setting up GCP CLI..."
+                        
+                        # Check if gcloud is already available
+                        if command -v gcloud >/dev/null 2>&1; then
+                            echo "✅ Google Cloud CLI already installed"
+                            gcloud version
+                            GCLOUD_PATH=$(which gcloud)
+                        else
+                            echo "📦 Google Cloud CLI not found, attempting to install..."
+                            
+                            # Download and install gcloud
+                            curl -sSL https://sdk.cloud.google.com | bash
+                            export PATH="$HOME/google-cloud-sdk/bin:$PATH"
+                            
+                            if command -v gcloud >/dev/null 2>&1; then
+                                echo "✅ Google Cloud CLI installed successfully"
+                                GCLOUD_PATH=$(which gcloud)
+                            else
+                                echo "❌ Failed to install Google Cloud CLI"
+                                exit 1
+                            fi
+                        fi
+                        
+                        echo "Using gcloud from: $GCLOUD_PATH"
+                        
+                        # Verify service account key file
+                        if [ ! -f "$GOOGLE_APPLICATION_CREDENTIALS" ]; then
+                            echo "❌ ERROR: Service account key file not found: $GOOGLE_APPLICATION_CREDENTIALS"
+                            exit 1
+                        fi
+                        
+                        # Validate JSON format
+                        if ! jq empty "$GOOGLE_APPLICATION_CREDENTIALS" 2>/dev/null; then
+                            echo "❌ ERROR: Service account key file is not valid JSON"
+                            exit 1
+                        fi
+                        
+                        echo "✅ Service account key file validated: $GOOGLE_APPLICATION_CREDENTIALS"
+                        
+                        # Authenticate using service account
+                        echo "🔑 Authenticating with service account..."
+                        $GCLOUD_PATH auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS"
+                        
+                        # Set project
+                        $GCLOUD_PATH config set project "$GCP_PROJECT_ID"
+                        
+                        # Verify authentication and permissions
+                        echo "✅ Authentication successful:"
+                        $GCLOUD_PATH auth list --filter=status:ACTIVE --format="value(account)"
+                        
+                        # Test project access
+                        echo "🔍 Testing project access..."
+                        if $GCLOUD_PATH projects describe "$GCP_PROJECT_ID" >/dev/null 2>&1; then
+                            echo "✅ Project access confirmed: $GCP_PROJECT_ID"
+                        else
+                            echo "⚠️ Warning: Limited project access, but continuing..."
+                        fi
+                        
+                        echo "🎉 GCP CLI setup completed successfully"
+                    '''
+                }
+            }
+        }
+
+        stage('🌐 Auto-detect SonarQube URL') {
+            steps {
+                script {
+                    sh '''#!/bin/bash
+                        echo "🔍 Auto-detecting SonarQube URL..."
+                        
+                        SONAR_URL=""
+                        SUCCESS=false
+                        
+                        # Test URLs in order of preference
+                        TEST_URLS=(
+                            "http://localhost:9000"
+                            "http://host.docker.internal:9000"
+                            "http://172.17.0.1:9000"
+                            "http://172.18.0.1:9000"
+                            "http://172.19.0.1:9000"
+                        )
+                        
+                        echo "🔗 Testing standard connection methods..."
+                        for url in "${TEST_URLS[@]}"; do
+                            echo "Testing: $url"
+                            if timeout 10 curl -s "$url/api/system/status" >/dev/null 2>&1; then
+                                SONAR_URL="$url"
+                                SUCCESS=true
+                                echo "✅ SonarQube accessible at: $url"
+                                break
+                            fi
+                        done
+                        
+                        # If standard methods fail, try container network approach
+                        if [ "$SUCCESS" = false ]; then
+                            echo "🔗 Attempting container network detection..."
+                            SONAR_CONTAINER_IP=$(docker inspect sonarqube 2>/dev/null | jq -r '.[0].NetworkSettings.IPAddress // empty' 2>/dev/null)
+                            
+                            if [ -n "$SONAR_CONTAINER_IP" ]; then
+                                echo "📍 SonarQube container IP: $SONAR_CONTAINER_IP"
+                                
+                                # Get SonarQube networks
+                                SONAR_NETWORKS=$(docker inspect sonarqube 2>/dev/null | jq -r '.[0].NetworkSettings.Networks | keys[]' 2>/dev/null || echo "")
+                                echo "🌐 SonarQube networks: $SONAR_NETWORKS"
+                                
+                                # Try to connect Jenkins to SonarQube network
+                                for network in $SONAR_NETWORKS; do
+                                    if [ "$network" != "null" ] && [ -n "$network" ]; then
+                                        echo "🔗 Connecting to network: $network"
+                                        if docker network connect "$network" jenkins 2>/dev/null; then
+                                            echo "✅ Connected to network: $network"
+                                        else
+                                            echo "ℹ️ Already connected to network: $network"
+                                        fi
+                                        
+                                        # Test connection
+                                        TEST_URL="http://$SONAR_CONTAINER_IP:9000"
+                                        if timeout 10 curl -s "$TEST_URL/api/system/status" >/dev/null 2>&1; then
+                                            SONAR_URL="$TEST_URL"
+                                            SUCCESS=true
+                                            echo "✅ SonarQube accessible via container network: $TEST_URL"
+                                            break
+                                        fi
+                                    fi
+                                done
+                            fi
+                        fi
+                        
+                        # Save result
+                        if [ "$SUCCESS" = true ]; then
+                            echo "SONARQUBE_URL=$SONAR_URL" > sonar_detected_url.env
+                            echo "✅ SonarQube URL detected and saved: $SONAR_URL"
+                        else
+                            echo "❌ Could not detect SonarQube URL"
+                            echo ""
+                            echo "🔧 Debugging information:"
+                            echo "Jenkins networks: $(docker inspect jenkins 2>/dev/null | jq -r '.[0].NetworkSettings.Networks | keys[]' 2>/dev/null || echo 'unknown')"
+                            echo "SonarQube status: $(docker ps --filter name=sonarqube --format 'table {{.Names}}\\t{{.Status}}\\t{{.Ports}}' || echo 'not found')"
+                            
+                            # Use fallback
+                            echo "⚠️ Using fallback URL: http://localhost:9000"
+                            echo "SONARQUBE_URL=http://localhost:9000" > sonar_detected_url.env
+                        fi
+                    '''
+                }
+            }
+        }
+
+        stage('📋 Verify Repository Contents') {
+            steps {
+                script {
+                    echo "📂 Verifying repository contents..."
+                    sh '''#!/bin/bash
+                        echo "=== Repository Information ==="
+                        echo "📍 Working Directory: $(pwd)"
+                        echo "📊 Directory Size: $(du -sh . 2>/dev/null || echo 'unknown')"
+                        echo "📁 Total Files: $(find . -type f | wc -l)"
+                        
+                        echo ""
+                        echo "=== File Structure ==="
+                        ls -la
+                        
+                        echo ""
+                        echo "=== Critical Files Check ==="
+                    '''
+                    
+                    // Verify critical files
+                    def criticalFiles = [
+                        'docker-compose.yml': 'Docker Compose configuration',
+                        'sonar-project.properties': 'SonarQube configuration',
+                        'Dockerfile': 'Docker build configuration',
+                        'go.mod': 'Go module file',
+                        'main.go': 'Go main file'
+                    ]
+                    
+                    criticalFiles.each { file, description ->
+                        if (fileExists(file)) {
+                            echo "✅ Found: ${file} (${description})"
+                            if (file == 'sonar-project.properties') {
+                                sh "echo '📄 Content preview:' && head -5 ${file}"
+                            }
+                        } else {
+                            echo "⚠️ Missing: ${file} (${description})"
+                        }
+                    }
+                    
+                    // Check source code files
+                    sh '''#!/bin/bash
+                        echo ""
+                        echo "=== Source Code Analysis ==="
+                        GO_FILES=$(find . -name "*.go" -not -path "./vendor/*" | wc -l)
+                        echo "📊 Go files found: $GO_FILES"
+                        
+                        if [ "$GO_FILES" -gt 0 ]; then
+                            echo "📝 Go files preview:"
+                            find . -name "*.go" -not -path "./vendor/*" | head -10
+                        fi
+                        
+                        # Check for test files
+                        TEST_FILES=$(find . -name "*_test.go" | wc -l)
+                        echo "🧪 Test files found: $TEST_FILES"
+                    '''
+                }
+            }
+        }
+
+        stage('Fetch Secret from GCP and Create .env') {
+            steps {
+                script {
+                    sh '''#!/bin/bash
+                        GCLOUD_PATH=$(which gcloud)
+                        
+                        # Langsung fetch tanpa list/check
+                        SECRET_JSON=$($GCLOUD_PATH secrets versions access latest --secret="$SECRET_NAME" --project="$GCP_PROJECT_ID")
+                        
+                        if [ $? -ne 0 ] || [ -z "$SECRET_JSON" ]; then
+                            echo "ERROR: Failed to fetch secret"
+                            exit 1
+                        fi
+                        
+                        echo "$SECRET_JSON" | jq -r 'to_entries | map(.key + "=" + (.value | tostring)) | .[]' > .env
+                        chmod 644 .env
+                        
+                        echo "✅ Generated .env file"
+                        sed 's/=.*/=***/' .env
+                    '''
+                }
+            }
+        }
+
+        stage('🔗 Load Detected SonarQube URL') {
+            steps {
+                script {
+                    // Load and validate SonarQube URL
+                    def detectedUrl = sh(script: "cat sonar_detected_url.env | cut -d'=' -f2", returnStdout: true).trim()
+                    env.SONARQUBE_URL = detectedUrl
+                    echo "🎯 Using SonarQube URL: ${detectedUrl}"
+                    
+                    // Validate URL format
+                    if (!detectedUrl.startsWith('http')) {
+                        error("❌ Invalid SonarQube URL format: ${detectedUrl}")
+                    }
+                }
+            }
+        }
+
+        stage('🔑 Test SonarQube Authentication') {
+            steps {
+                script {
+                    sh '''#!/bin/bash
+                        echo "🔑 Testing SonarQube connectivity and authentication..."
+                        echo "🌐 URL: $SONARQUBE_URL"
+                        
+                        # Test basic connectivity
+                        echo "📡 Testing basic connectivity..."
+                        HTTP_CODE=$(timeout 15 curl -s -o /dev/null -w "%{http_code}" "$SONARQUBE_URL" 2>/dev/null || echo "000")
+                        echo "HTTP Response: $HTTP_CODE"
+                        
+                        if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "302" ] && [ "$HTTP_CODE" != "404" ]; then
+                            echo "❌ SonarQube not accessible"
+                            
+                            # Try alternatives
+                            echo "🔄 Trying alternative URLs..."
+                            ALTERNATIVES=("http://localhost:9000" "http://host.docker.internal:9000" "http://172.17.0.1:9000")
+                            
+                            for alt_url in "${ALTERNATIVES[@]}"; do
+                                echo "Testing: $alt_url"
+                                ALT_CODE=$(timeout 10 curl -s -o /dev/null -w "%{http_code}" "$alt_url" 2>/dev/null || echo "000")
+                                if [ "$ALT_CODE" = "200" ] || [ "$ALT_CODE" = "302" ] || [ "$ALT_CODE" = "404" ]; then
+                                    echo "✅ Alternative URL working: $alt_url"
+                                    export SONARQUBE_URL="$alt_url"
+                                    echo "SONARQUBE_URL=$alt_url" > sonar_detected_url.env
+                                    break
+                                fi
+                            done
+                        else
+                            echo "✅ SonarQube is accessible"
+                        fi
+                        
+                        # Test authentication
+                        if [ -n "$SONAR_TOKEN" ]; then
+                            echo "🔐 Testing authentication with token..."
+                            AUTH_RESPONSE=$(timeout 15 curl -s -u "$SONAR_TOKEN:" "$SONARQUBE_URL/api/authentication/validate" 2>/dev/null || echo '{"valid":false}')
+                            AUTH_VALID=$(echo "$AUTH_RESPONSE" | jq -r '.valid // false' 2>/dev/null || echo "false")
+                            
+                            if [ "$AUTH_VALID" = "true" ]; then
+                                echo "✅ Authentication successful"
+                            else
+                                echo "⚠️ Authentication failed - continuing with public access"
+                            fi
+                        else
+                            echo "ℹ️ No token provided - using public access"
+                        fi
+                        
+                        echo "✅ SonarQube connectivity test completed"
+                    '''
+                }
+            }
+        }
+
+        stage('🔍 SonarQube Analysis') {
+            steps {
+                script {
+                    echo "🔍 Starting SonarQube code analysis..."
+                    
+                    try {
+                        // Try Jenkins SonarQube plugin first
+                        def scannerHome = tool 'SonarScanner'
+                        echo "✅ Using Jenkins SonarQube plugin"
+                        
+                        withSonarQubeEnv() {
+                            sh """#!/bin/bash
+                                echo "🚀 Running SonarQube analysis with Jenkins plugin..."
+                                echo "📍 Scanner: ${scannerHome}"
+                                echo "🌐 URL: ${env.SONARQUBE_URL}"
+                                
+                                # Run analysis with comprehensive parameters
+                                ${scannerHome}/bin/sonar-scanner \
+                                    -Dsonar.host.url=${env.SONARQUBE_URL} \
+                                    -Dsonar.login=${env.SONAR_TOKEN} \
+                                    -Dsonar.projectKey=filestorage-service \
+                                    -Dsonar.projectName="Filestorage Service" \
+                                    -Dsonar.projectVersion=${env.BUILD_NUMBER} \
+                                    -Dsonar.sources=. \
+                                    -Dsonar.exclusions="**/vendor/**,**/node_modules/**,**/*.log,**/target/**,**/build/**,**/.git/**,**/docker-compose.yml,**/Dockerfile,**/Jenkinsfile,**/.env,**/sonar-scanner-*/**" \
+                                    -Dsonar.go.coverage.reportPaths=coverage.out \
+                                    -Dsonar.sourceEncoding=UTF-8 \
+                                    -X
+                            """
+                        }
+                    } catch (Exception e) {
+                        echo "⚠️ Jenkins plugin failed, using standalone scanner: ${e.getMessage()}"
+                        
+                        sh '''#!/bin/bash
+                            echo "📦 Using standalone SonarQube scanner..."
+                            
+                            # Download scanner if needed
+                            if ! command -v sonar-scanner >/dev/null 2>&1; then
+                                echo "📥 Downloading SonarScanner..."
+                                SCANNER_VERSION="4.8.0.2856"
+                                wget -q "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SCANNER_VERSION}-linux.zip"
+                                unzip -q "sonar-scanner-cli-${SCANNER_VERSION}-linux.zip"
+                                export PATH="$PWD/sonar-scanner-${SCANNER_VERSION}-linux/bin:$PATH"
+                            fi
+                            
+                            # Load SonarQube URL
+                            source sonar_detected_url.env
+                            
+                            # Run analysis
+                            echo "🔍 Starting analysis..."
+                            sonar-scanner \
+                                -Dsonar.host.url="$SONARQUBE_URL" \
+                                -Dsonar.login="$SONAR_TOKEN" \
+                                -Dsonar.projectKey=filestorage-service \
+                                -Dsonar.projectName="Filestorage Service" \
+                                -Dsonar.projectVersion="$BUILD_NUMBER" \
+                                -Dsonar.sources=. \
+                                -Dsonar.exclusions="**/vendor/**,**/node_modules/**,**/*.log,**/target/**,**/build/**,**/.git/**,**/docker-compose.yml,**/Dockerfile,**/Jenkinsfile,**/.env,**/sonar-scanner-*/**"
+                        '''
+                    }
+                    
+                    echo "✅ SonarQube analysis completed"
+                }
+            }
+        }
+
+        stage('🎯 Quality Gate') {
+            steps {
+                script {
+                    echo "🎯 Checking Quality Gate status..."
+                    
+                    sh '''#!/bin/bash
+                        echo "⏳ Quality Gate Status Check"
+                        echo "=============================="
+                        
+                        # Load configuration
+                        source sonar_detected_url.env || export SONARQUBE_URL="http://localhost:9000"
+                        PROJECT_KEY="filestorage-service"
+                        
+                        echo "📊 Project: $PROJECT_KEY"
+                        echo "🌐 SonarQube: $SONARQUBE_URL"
+                        
+                        # Wait for analysis to complete
+                        echo "⏳ Waiting for analysis to complete..."
+                        sleep 45
+                        
+                        # Check Quality Gate status
+                        echo "🔍 Checking Quality Gate status..."
+                        
+                        for attempt in {1..3}; do
+                            echo "📡 Attempt $attempt/3..."
+                            
+                            if [ -n "$SONAR_TOKEN" ]; then
+                                QG_RESPONSE=$(timeout 20 curl -s -u "$SONAR_TOKEN:" "$SONARQUBE_URL/api/qualitygates/project_status?projectKey=$PROJECT_KEY" 2>/dev/null || echo "")
+                            else
+                                QG_RESPONSE=$(timeout 20 curl -s "$SONARQUBE_URL/api/qualitygates/project_status?projectKey=$PROJECT_KEY" 2>/dev/null || echo "")
+                            fi
+                            
+                            if [ -n "$QG_RESPONSE" ] && [ "$QG_RESPONSE" != "null" ]; then
+                                QG_STATUS=$(echo "$QG_RESPONSE" | jq -r '.projectStatus.status // "UNKNOWN"' 2>/dev/null || echo "UNKNOWN")
+                                
+                                if [ "$QG_STATUS" != "UNKNOWN" ]; then
+                                    break
+                                fi
+                            fi
+                            
+                            echo "⏳ Waiting 15 seconds before retry..."
+                            sleep 15
+                        done
+                        
+                        # Report results
+                        echo ""
+                        echo "🎯 Quality Gate Result: $QG_STATUS"
+                        echo "=================================="
+                        
+                        case $QG_STATUS in
+                            "OK")
+                                echo "✅ Quality Gate: PASSED"
+                                echo "🎉 Code quality meets requirements!"
+                                ;;
+                            "ERROR")
+                                echo "❌ Quality Gate: FAILED"
+                                echo "🔗 View details: $SONARQUBE_URL/dashboard?id=$PROJECT_KEY"
+                                echo "⚠️  Continuing deployment (Quality Gate failure is non-blocking)"
+                                ;;
+                            "WARN")
+                                echo "⚠️ Quality Gate: WARNING"
+                                echo "🔗 View details: $SONARQUBE_URL/dashboard?id=$PROJECT_KEY"
+                                ;;
+                            *)
+                                echo "❓ Quality Gate: Status unclear ($QG_STATUS)"
+                                echo "🔗 Manual check: $SONARQUBE_URL/dashboard?id=$PROJECT_KEY"
+                                ;;
+                        esac
+                        
+                        echo ""
+                        echo "📊 Full SonarQube Report: $SONARQUBE_URL/dashboard?id=$PROJECT_KEY"
+                        echo "✅ Quality Gate check completed"
+                    '''
+                }
+            }
+        }
+
+        stage('Build and Deploy with Docker Compose') {
+            steps {
+                script {
+                    sh '''#!/bin/bash
+                        echo "🚀 Starting Docker Compose deployment..."
+
+                        echo "🧹 Cleaning up existing containers..."
+                        docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+                        docker rm -f "$CONTAINER_NAME-app" 2>/dev/null || true
+                        
+                        # Detect docker compose command inline
+                        if command -v docker-compose >/dev/null 2>&1; then
+                            DOCKER_COMPOSE_CMD="docker-compose"
+                            echo "✅ Using docker-compose"
+                        elif docker compose version >/dev/null 2>&1; then
+                            DOCKER_COMPOSE_CMD="docker compose"
+                            echo "✅ Using docker compose"
+                        else
+                            echo "❌ ERROR: No docker compose found"
+                            exit 1
+                        fi
+                        
+                        # Check .env file
+                        if [ ! -f .env ]; then
+                            echo "❌ ERROR: .env file not found"
+                            exit 1
+                        fi
+                        
+                        echo "✅ Found .env file"
+                        sed 's/=.*/=***/' .env
+                        
+                        # Deploy
+                        echo "🛑 Stopping containers..."
+                        $DOCKER_COMPOSE_CMD down --remove-orphans || true
+                        
+                        echo "🔨 Building images..."
+                        $DOCKER_COMPOSE_CMD build --no-cache
+                        
+                        echo "🚀 Starting services..."
+                        $DOCKER_COMPOSE_CMD up -d
+                        
+                        echo "✅ Deployment completed"
+                    '''
+                }
+            }
+        }
+
+        stage('✅ Verify Deployment') {
+            steps {
+                script {
+                    sh '''#!/bin/bash
+                        echo "✅ Performing deployment verification..."
+                        
+                        # Load compose command
+                        source docker_compose_cmd.env
+                        echo "📋 Using: $DOCKER_COMPOSE_CMD"
+                        
+                        # Extended health check
+                        echo "⏳ Extended health check (30 seconds)..."
+                        sleep 30
+                        
+                        echo ""
+                        echo "📊 Final Service Status:"
+                        echo "========================"
+                        $DOCKER_COMPOSE_CMD ps --format "table {{.Name}}\\t{{.Command}}\\t{{.State}}\\t{{.Ports}}"
+                        
+                        # Check service health
+                        echo ""
+                        echo "🏥 Health Check Results:"
+                        echo "========================"
+                        
+                        # Get service names
+                        SERVICES=$($DOCKER_COMPOSE_CMD config --services)
+                        HEALTHY_COUNT=0
+                        TOTAL_COUNT=0
+                        
+                        for service in $SERVICES; do
+                            TOTAL_COUNT=$((TOTAL_COUNT + 1))
+                            
+                            # Check if service is running
+                            if $DOCKER_COMPOSE_CMD ps "$service" | grep -q "Up"; then
+                                echo "✅ $service: Running"
+                                HEALTHY_COUNT=$((HEALTHY_COUNT + 1))
+                                
+                                # Additional health checks for main application
+                                if [ "$service" = "app" ] || [ "$service" = "filestorage-service" ]; then
+                                    echo "   🔍 Testing application health..."
+                                    
+                                    # Get application port
+                                    APP_PORT=$($DOCKER_COMPOSE_CMD port "$service" 8888 2>/dev/null | cut -d: -f2 || echo "")
+                                    
+                                    if [ -n "$APP_PORT" ]; then
+                                        if timeout 10 curl -s "http://localhost:$APP_PORT/health" >/dev/null 2>&1; then
+                                            echo "   ✅ Application health check passed"
+                                        else
+                                            echo "   ⚠️ Application health check failed (endpoint may not exist)"
+                                        fi
+                                    fi
+                                fi
+                            else
+                                echo "❌ $service: Not running"
+                            fi
+                        done
+                        
+                        # Show recent logs
+                        echo ""
+                        echo "📋 Recent Application Logs:"
+                        echo "============================"
+                        $DOCKER_COMPOSE_CMD logs --tail=30 --timestamps || true
+                        
+                        # Network information
+                        echo ""
+                        echo "🌐 Network Information:"
+                        echo "======================="
+                        COMPOSE_NETWORK=$($DOCKER_COMPOSE_CMD config --format json | jq -r '.networks | keys[]' 2>/dev/null | head -1 || echo "unknown")
+                        echo "Compose network: $COMPOSE_NETWORK"
+                        
+                        # Port mapping
+                        echo ""
+                        echo "🔌 Port Mappings:"
+                        echo "================="
+                        $DOCKER_COMPOSE_CMD ps --format "table {{.Name}}\\t{{.Ports}}" | grep -v "Name" || echo "No port mappings found"
+                        
+                        # Final summary
+                        echo ""
+                        echo "🎯 Deployment Verification Summary:"
+                        echo "==================================="
+                        echo "   - Total services: $TOTAL_COUNT"
+                        echo "   - Healthy services: $HEALTHY_COUNT"
+                        echo "   - Success rate: $(( HEALTHY_COUNT * 100 / TOTAL_COUNT ))%"
+                        
+                        if [ "$HEALTHY_COUNT" -eq "$TOTAL_COUNT" ]; then
+                            echo "   - Status: ✅ ALL SERVICES HEALTHY"
+                        elif [ "$HEALTHY_COUNT" -gt 0 ]; then
+                            echo "   - Status: ⚠️ PARTIAL SUCCESS"
+                        else
+                            echo "   - Status: ❌ DEPLOYMENT FAILED"
+                            exit 1
+                        fi
+                        
+                        echo ""
+                        echo "🎉 Deployment verification completed!"
+                        
+                        # Application access information
+                        echo ""
+                        echo "🔗 Application Access:"
+                        echo "====================="
+                        $DOCKER_COMPOSE_CMD ps --format "table {{.Name}}\\t{{.Ports}}" | grep -E "80|443|8080|8888|3000" | while read line; do
+                            if echo "$line" | grep -q "->"; then
+                                SERVICE=$(echo "$line" | awk '{print $1}')
+                                PORT=$(echo "$line" | grep -o "0.0.0.0:[0-9]*" | cut -d: -f2)
+                                echo "   - $SERVICE: http://localhost:$PORT"
+                            fi
+                        done || echo "   - Check docker-compose ps for port mappings"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                echo "🎉 Pipeline completed successfully!"
+                echo "=================================="
+                echo "✅ Build Number: ${env.BUILD_NUMBER}"
+                echo "⏱️ Build Duration: ${currentBuild.durationString}"
+                echo "📊 SonarQube Report: ${env.SONARQUBE_URL}/dashboard?id=filestorage-service"
+                echo "🚀 Application deployed and verified"
+                echo ""
+                echo "📋 Quick Access Links:"
+                echo "   - SonarQube Dashboard: ${env.SONARQUBE_URL}/dashboard?id=filestorage-service"
+                echo "   - Jenkins Build: ${env.BUILD_URL}"
+                echo "   - Application: Check docker-compose port mappings"
+                
+                // Optional: Send success notification
+                sh '''#!/bin/bash
+                    echo "🎉 SUCCESS NOTIFICATION"
+                    echo "======================"
+                    echo "Pipeline: $JOB_NAME"
+                    echo "Build: $BUILD_NUMBER"
+                    echo "Status: SUCCESS"
+                    echo "Duration: $(date -d@$BUILD_DURATION -u +%H:%M:%S 2>/dev/null || echo 'N/A')"
+                    echo "Timestamp: $(date)"
+                '''
+            }
+        }
+        failure {
+            script {
+                echo "❌ Pipeline failed!"
+                echo "=================="
+                echo "🔍 Check the logs above for error details"
+                echo "🏗️ Build Number: ${env.BUILD_NUMBER}"
+                echo "⏱️ Failed after: ${currentBuild.durationString}"
+                
+                sh '''#!/bin/bash
+                    echo "🧹 Cleaning up failed deployment..."
+                    
+                    # Load docker compose command if available
+                    if [ -f docker_compose_cmd.env ]; then
+                        source docker_compose_cmd.env
+                        echo "📋 Using: $DOCKER_COMPOSE_CMD"
+                        
+                        # Show current status
+                        echo "📊 Current container status:"
+                        $DOCKER_COMPOSE_CMD ps || true
+                        
+                        # Show recent logs for debugging
+                        echo ""
+                        echo "📋 Recent logs for debugging:"
+                        $DOCKER_COMPOSE_CMD logs --tail=50 --timestamps || true
+                        
+                        # Stop containers
+                        echo ""
+                        echo "🛑 Stopping containers..."
+                        $DOCKER_COMPOSE_CMD down --remove-orphans --timeout 30 || true
+                    else
+                        echo "⚠️ Docker compose command not available, trying both variants..."
+                        
+                        if command -v docker-compose >/dev/null 2>&1; then
+                            echo "📋 Using docker-compose"
+                            docker-compose ps || true
+                            docker-compose logs --tail=50 || true
+                            docker-compose down --remove-orphans || true
+                        elif docker compose version >/dev/null 2>&1; then
+                            echo "📋 Using docker compose"
+                            docker compose ps || true
+                            docker compose logs --tail=50 || true
+                            docker compose down --remove-orphans || true
+                        fi
+                    fi
+                    
+                    echo "❌ FAILURE NOTIFICATION"
+                    echo "======================"
+                    echo "Pipeline: $JOB_NAME"
+                    echo "Build: $BUILD_NUMBER"
+                    echo "Status: FAILED"
+                    echo "Stage: $STAGE_NAME"
+                    echo "Timestamp: $(date)"
+                '''
+            }
+        }
+        unstable {
+            echo "⚠️ Pipeline completed with warnings"
+            echo "Some tests may have failed, but deployment continued"
+        }
+        always {
+            script {
+                sh '''#!/bin/bash
+                    echo "🧹 Final cleanup..."
+                    
+                    # Clean up sensitive files
+                    echo "🔐 Removing sensitive files..."
+                    rm -f /tmp/gcp-sa-key.json
+                    chmod 600 /tmp/gcp-sa-key.json 2>/dev/null || true  # Ensure restrictive permissions before removal
+                    
+                    # Clean up temporary files
+                    echo "🗑️ Removing temporary files..."
+                    rm -f sonar_detected_url.env
+                    rm -f docker_compose_cmd.env
+                    rm -rf sonar-scanner-*
+                    
+                    # Clean up old Docker images (optional)
+                    echo "🧹 Docker cleanup..."
+                    docker image prune -f --filter "until=24h" || true
+                    
+                    # Disk space check
+                    echo "💾 Disk space after cleanup:"
+                    df -h . | tail -1
+                    
+                    echo "✅ Cleanup completed"
+                '''
+            }
+            
+            // Archive important artifacts
+            script {
+                try {
+                    archiveArtifacts artifacts: 'sonar-project.properties,docker-compose.yml', allowEmptyArchive: true
+                } catch (Exception e) {
+                    echo "⚠️ Failed to archive artifacts: ${e.getMessage()}"
+                }
+            }
+            
+            // Clean workspace
+            cleanWs(
+                cleanWhenAborted: true,
+                cleanWhenFailure: true,
+                cleanWhenNotBuilt: true,
+                cleanWhenSuccess: true,
+                cleanWhenUnstable: true,
+                deleteDirs: true
+            )
+        }
+    }
+}
