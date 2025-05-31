@@ -70,16 +70,22 @@ pipeline {
                 script {
                     withCredentials([
                         file(credentialsId: "gcp-service-account-key", variable: "GOOGLE_APPLICATION_CREDENTIALS"),
+                        file(credentialsId: "gcs-secret-key", variable: "GCS_SECRET_KEY_FILE"),
                         string(credentialsId: "sonarqube-token", variable: "SONAR_TOKEN")
                     ]) {
-                        echo "✅ GCP service account and SonarQube credentials loaded successfully"
+                        echo "✅ GCP service account, GCS secret key, and SonarQube credentials loaded successfully"
                         
-                        // Copy file to a known location with better security
+                        // Copy files to known locations with better security
                         sh '''#!/bin/bash
+                            # Copy GCP service account key
                             cp "$GOOGLE_APPLICATION_CREDENTIALS" /tmp/gcp-sa-key.json
                             chmod 600 /tmp/gcp-sa-key.json  # More restrictive permissions
                             
-                            # Verify file was copied
+                            # Copy GCS secret key to project directory
+                            cp "$GCS_SECRET_KEY_FILE" ./gcs-secret-key.json
+                            chmod 600 ./gcs-secret-key.json
+                            
+                            # Verify files were copied
                             if [ -f /tmp/gcp-sa-key.json ]; then
                                 echo "✅ Service account key copied successfully"
                                 echo "📊 File size: $(stat -c%s /tmp/gcp-sa-key.json) bytes"
@@ -87,6 +93,27 @@ pipeline {
                                 echo "❌ Failed to copy service account key"
                                 exit 1
                             fi
+                            
+                            if [ -f ./gcs-secret-key.json ]; then
+                                echo "✅ GCS secret key copied successfully"
+                                echo "📊 File size: $(stat -c%s ./gcs-secret-key.json) bytes"
+                            else
+                                echo "❌ Failed to copy GCS secret key"
+                                exit 1
+                            fi
+                            
+                            # Validate JSON format for both files
+                            if ! jq empty /tmp/gcp-sa-key.json 2>/dev/null; then
+                                echo "❌ ERROR: Service account key file is not valid JSON"
+                                exit 1
+                            fi
+                            
+                            if ! jq empty ./gcs-secret-key.json 2>/dev/null; then
+                                echo "❌ ERROR: GCS secret key file is not valid JSON"
+                                exit 1
+                            fi
+                            
+                            echo "✅ All JSON files validated successfully"
                         '''
                         
                         env.GOOGLE_APPLICATION_CREDENTIALS = "/tmp/gcp-sa-key.json"
@@ -273,7 +300,8 @@ pipeline {
                         'sonar-project.properties': 'SonarQube configuration',
                         'Dockerfile': 'Docker build configuration',
                         'go.mod': 'Go module file',
-                        'main.go': 'Go main file'
+                        'main.go': 'Go main file',
+                        'gcs-secret-key.json': 'GCS secret key file'
                     ]
                     
                     criticalFiles.each { file, description ->
@@ -282,8 +310,16 @@ pipeline {
                             if (file == 'sonar-project.properties') {
                                 sh "echo '📄 Content preview:' && head -5 ${file}"
                             }
+                            if (file == 'gcs-secret-key.json') {
+                                sh "echo '🔐 GCS secret key file validated and ready for build'"
+                            }
                         } else {
-                            echo "⚠️ Missing: ${file} (${description})"
+                            if (file == 'gcs-secret-key.json') {
+                                echo "❌ Missing: ${file} (${description}) - This is required for the application!"
+                                error("GCS secret key file is required but not found")
+                            } else {
+                                echo "⚠️ Missing: ${file} (${description})"
+                            }
                         }
                     }
                     
@@ -425,7 +461,7 @@ pipeline {
                                     -Dsonar.projectName="Filestorage Service" \
                                     -Dsonar.projectVersion=${env.BUILD_NUMBER} \
                                     -Dsonar.sources=. \
-                                    -Dsonar.exclusions="**/vendor/**,**/node_modules/**,**/*.log,**/target/**,**/build/**,**/.git/**,**/docker-compose.yml,**/Dockerfile,**/Jenkinsfile,**/.env,**/sonar-scanner-*/**" \
+                                    -Dsonar.exclusions="**/vendor/**,**/node_modules/**,**/*.log,**/target/**,**/build/**,**/.git/**,**/docker-compose.yml,**/Dockerfile,**/Jenkinsfile,**/.env,**/sonar-scanner-*/**,**/gcs-secret-key.json" \
                                     -Dsonar.go.coverage.reportPaths=coverage.out \
                                     -Dsonar.sourceEncoding=UTF-8 \
                                     -X
@@ -458,7 +494,7 @@ pipeline {
                                 -Dsonar.projectName="Filestorage Service" \
                                 -Dsonar.projectVersion="$BUILD_NUMBER" \
                                 -Dsonar.sources=. \
-                                -Dsonar.exclusions="**/vendor/**,**/node_modules/**,**/*.log,**/target/**,**/build/**,**/.git/**,**/docker-compose.yml,**/Dockerfile,**/Jenkinsfile,**/.env,**/sonar-scanner-*/**"
+                                -Dsonar.exclusions="**/vendor/**,**/node_modules/**,**/*.log,**/target/**,**/build/**,**/.git/**,**/docker-compose.yml,**/Dockerfile,**/Jenkinsfile,**/.env,**/sonar-scanner-*/**,**/gcs-secret-key.json"
                         '''
                     }
                     
@@ -574,6 +610,14 @@ pipeline {
                         
                         echo "✅ Found .env file"
                         sed 's/=.*/=***/' .env
+                        
+                        # Check GCS secret key file
+                        if [ ! -f gcs-secret-key.json ]; then
+                            echo "❌ ERROR: gcs-secret-key.json file not found"
+                            exit 1
+                        fi
+                        
+                        echo "✅ Found gcs-secret-key.json file"
                         
                         # Deploy
                         echo "🛑 Stopping containers..."
@@ -798,7 +842,9 @@ pipeline {
                     # Clean up sensitive files
                     echo "🔐 Removing sensitive files..."
                     rm -f /tmp/gcp-sa-key.json
+                    rm -f ./gcs-secret-key.json
                     chmod 600 /tmp/gcp-sa-key.json 2>/dev/null || true  # Ensure restrictive permissions before removal
+                    chmod 600 ./gcs-secret-key.json 2>/dev/null || true
                     
                     # Clean up temporary files
                     echo "🗑️ Removing temporary files..."
