@@ -7,7 +7,7 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - ${GOLANG_PORT}:8888
+      - ${GOLANG_PORT}:${GOLANG_PORT}
     restart: always
     volumes:
       - ./:/app
@@ -17,7 +17,10 @@ services:
       - .env
 
   nginx: 
-    image: nginx:alpine
+    build:
+      context: ./docker/nginx
+      dockerfile: Dockerfile
+    container_name: nginx-filestorage-service
     ports:
       - 8086:80
       - 8447:443
@@ -28,7 +31,7 @@ services:
     volumes:
       - ./storage/:/app/storage/
       - ./static/:/app/static/
-      - ./docker/nginx/:/etc/nginx/conf.d
+      # - ./docker/nginx/:/etc/nginx/conf.d
     networks:
       - microservices-db-dev  # Fixed: same network as app
 

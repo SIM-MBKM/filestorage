@@ -34,6 +34,6 @@ COPY gcs-secret-key.json /gcs-secret-key.json
 # Note: distroless doesn't have chmod, so we need to handle this in the build stage
 USER nonroot:nonroot
 
-EXPOSE 8888
+EXPOSE 8005
 
 ENTRYPOINT [ "/main" ]
